@@ -1,0 +1,380 @@
+---
+title: All Positive Cases from (01/11/21) - Description, Hospitalisation and Mortality Risks
+author: "Steven Kerr, Chris Robertson"
+date: ' `r format(Sys.Date(), "%d %B %Y")` '
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Libraries
+library(plyr)
+library(tidyverse)
+library(survival)
+library(finalfit)
+library(knitr)
+library(rmarkdown)
+library(flextable)
+
+Location = '/conf/'
+
+setwd(paste0(Location, 'EAVE/GPanalysis/progs/CR/SGene_Omicron'))
+
+######### 1 Load data #######
+
+df_pos <- readRDS("./output/temp/Sgene_all_positive.rds") 
+
+
+# Create a combine variant, vaccination status column for pyears calculations
+#df_seq <- mutate(df_seq, variant_vs = as.factor(paste(variant, vs, sep = '_')))
+
+
+rgs <- colnames(df_pos)[startsWith(colnames(df_pos), "Q")]
+
+# Start date is the first AY4.2 case
+a_begin <- min(df_pos$date_ecoss_specimen, na.rm=T) 
+a_end <- max(df_pos$date_ecoss_specimen, na.rm=T) 
+a_end_hosp <- max(df_pos$admission_date, na.rm=T) 
+a_end_death <- max(df_pos$NRS.Date.Death, na.rm=T) 
+
+a_last_date_wgs <- df_pos %>% filter(variant != "not_sequenced") %>% dplyr::summarise(last_date = max(date_ecoss_specimen)) %>% pull(last_date) 
+a_last_date_wgs <- a_last_date_wgs - 2
+
+
+source('./00_functions.R')
+
+fun.extract <- function(z.fit) {
+  #takes a coxph filt using penalised splines and drops off the ps terms
+  #make sure no variable begins ps
+  z <- summary(z.fit)
+  z <- data.frame(z$conf.int)
+  z <- z %>% mutate(names = row.names(z)) %>% 
+   filter(!(grepl("^ps", names))) %>% 
+   dplyr::relocate(names, .before=1) %>% 
+   dplyr::select(-exp..coef.)
+  names(z) <- c("names","HR","LCL","UCL")
+ z
+}
+
+fun_print_hr <- function(z,z_var){
+ # z_var <- "vsv2_14+"
+  z1 <- filter(z,names==z_var)
+  z1[c("HR","LCL","UCL")] <- round(z1[c("HR","LCL","UCL")], 2)
+  str_c(z1["HR"], ", 95% CI (", z1["LCL"], ", ", z1["UCL"],")")
+}
+
+plot_HR <- function(model_fit, term){
+# plots hazard ratios for a single term in a fitted model
+  
+hr <- termplot(model_fit, term = term, se = T, plot = F)
+
+var <- names(hr)
+
+hr <- hr[[var]]
+
+hr <- mutate(hr, ucl = y + 1.96*se,
+                 lcl = y - 1.96*se) %>%
+      mutate_at(c('y', 'ucl', 'lcl'), exp)
+
+hr <- do.call(data.frame,lapply(hr, function(x) replace(x, is.infinite(x),NA)))
+
+output <- ggplot(data=hr, aes(x=x, y=y)) + geom_line() +
+    geom_ribbon(aes(ymin=lcl, ymax=ucl), linetype=2, alpha=0.1, fill = 'steelblue')  + 
+    ylab("Hazard Ratio")
+
+if (var == 'ageYear'){
+  output <- output + xlab("Age")
+} else if (var == 'days'){
+  output <- output + xlab("Days since first specimen collection date")
+}
+
+output
+}
+```
+
+## Introduction
+
+The main analyis in this report is based upon all patients who tested positive in Scotland from `r format(a_begin, "%d %b %Y")` to `r format(a_end, "%d %b %Y")`.  The analysis of hospitalisations uses the last date of admission to hospital - `r format(a_end_hosp, "%d %b %Y")` and the analysis of deaths uses the latest date of death - `r format(a_end_death, "%d %b %Y")`.  The first positive test result after the beginning of the study is used.  Some individuals will have tested positivei prior to the start of the study and the number of days from the last positive test prior to the study start is recorded.
+
+A covid admission to hospital is taken to be individuals who have a positive covid test within 14 days prior to admission or who tested positive within 2 days of admission. Also included are patients who were already in hospital and then tested positive, more than 2 days post admission.  The latter group are not included in the analysis of the risk of hospital admission from the community with covid as they are already in hospital. 
+
+The S gene variable takes one of the values: S positive (S_Pos), S Negative (S_Neg), weak S positive (Weak_S_Pos), other and Unknown. Unknown corresponds to individuals who were tested in NHS labs or who were tested in the lighthouse lab but the same did not yield any ct values.  S gene status only comes from samples tested in the lighthouse laboratory and other corresponds to ct values which could not be classified as one of the three S Gene statuses.
+
+The testing data and viral sequencing data are linked to the EAVE study data of GP clincial conditions.
+
+Hospital admission is derived from the RAPID database only.  This database records admissions to hospital and for many patients there are repeat admissions within a short space of time, sometimes with missing discharge dates.  The rule for combining repeat admission episodes into putative continuous inpatient stays is the same as for the hospital acquired covid infection report.  Episodes where the discharge date on one is the same or the day before the admission date of the following episode are combined; if the discahrge date is missing and a subsequent admission is within 2 days of the previous one the episodes are combined; if the discharge date is missing and there is a subsequent admission 3 or more days in the future then the discahrge date is set to 2 days after admission.
+
+Vaccination status is defined at the date the of the positive PCR test.  It is coded as unvaccinated (uv), one dose and tested positive within 27 days (v1_0:3), one dose and 28+ days (v1_4+), with 2 dose groups - 0-13 days post second dose (v2_0:1), 14-41 days post second dose (v2_2:5), 42-69 days post second dose (v2_6:9), 10 or more weeks (70+ days) post second dose (v2_10+).  For those with a dose 3 or booster the categories are 0 or 1 week post dose 3/booster (v3_0:1) or 2 or more weeks post dose 3/booster (v3_2+).  In the descriptive tables, 'vs' is the vaccination status variable.
+
+n_tests is number of positive tests before the cohort start date. n_hh_gp is the number of people in their househld. ave_hh_age is average household age. ur6_2016 is urban-rural classification. lab = lh means test was done in a lighthouse lab. 
+
+Cox proportional hazard models are used to estimate the risk of hospitalisation and covid death following a positive covid test result. 'S_Pos' is the reference category for S Gene Status, and 'unvaccinated' is the reference category for vaccination status.
+
+
+## Descriptives
+
+### All Who Tested Positive
+
+
+```{r table_1, echo=FALSE, warning=FALSE, message = FALSE}
+
+summary_tbl_all <- read_csv(paste0("./output/summary_table_weights_cohort_all.csv"))
+summary_tbl_all$Characteristic <- replace_na(summary_tbl_all$Characteristic, '') 
+
+#mytable(summary_tbl_all)
+kableExtra::kbl(summary_tbl_all, 
+        caption = "Numbers and percentages among all testing positive", 
+        align = c("l", "l", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### All who tested positive and link into EAVE-II
+
+```{r table_2, echo=FALSE, warning=FALSE, message = FALSE}
+
+summary_tbl_eave <- read_csv(paste0("./output/summary_table_weights_cohort_eave.csv"))
+summary_tbl_eave$Characteristic <- replace_na(summary_tbl_eave$Characteristic, '') 
+
+#mytable(summary_tbl_eave)
+kableExtra::kbl(summary_tbl_eave, 
+        caption = "Numbers and percentages among those testing positive who link to EAVE-II", 
+        align = c("l", "l", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+
+### Lighthouse positive by S Gene Status
+
+Other and unknown omitted
+
+```{r table_3, echo=FALSE, warning=FALSE, message = FALSE}
+
+summary_tbl_sg <- read_csv(paste0("./output/summary_table_weights_cohort_all_sg.csv"))
+summary_tbl_sg$Characteristic <- replace_na(summary_tbl_sg$Characteristic, '') 
+
+#mytable(summary_tbl_sg)
+kableExtra::kbl(summary_tbl_sg, 
+        caption = "Numbers and percentages of all testing positive by S Gene Status", 
+        align = c("l", "l", "r", "r", "r", "r", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+### Lighthouse  positive - S Gene Status by Vaccine Status
+
+Other and unknown omitted
+
+```{r table_4, echo=FALSE, warning=FALSE, message = FALSE}
+
+summary_tbl_vs_sg <- read_csv(paste0("./output/summary_table_vs_sgene.csv"))
+kableExtra::kbl(summary_tbl_vs_sg, 
+        caption = "Numbers of and percentages in each S Gene status by Vaccine Status", 
+        align = c("l", "r", "r", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
+### Lighthouse  positive - S Gene Status by Vaccine Status and Type
+
+Other and unknown omitted
+
+```{r table_4_type, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/summary_table_vt_sgene.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Numbers of and percentages in each S Gene status by Vaccine Status and Type", 
+        align = c("l", "r", "r", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
+
+
+### All who tested positive - S Gene Status by Age Group
+
+```{r table_5, echo=FALSE, warning=FALSE, message = FALSE}
+
+summary_tbl_agegp_sg <- read_csv(paste0("./output/summary_table_agegp_sgene.csv"))
+kableExtra::kbl(summary_tbl_agegp_sg, 
+        caption = "Numbers of and percentages in each S Gene status by Age Group", 
+        align = c("l", "r", "r", "r") ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+
+```
+
+### S Gene Status by Sequencing Variant
+
+
+This analysis is based upon specimens up to and including `r format(a_last_date_wgs,"%d %b %Y")` as that is the last date where sequencing data is available.
+
+```{r sge_sequence, , echo=FALSE, warning=FALSE, message = FALSE}
+z_tab <- read_csv(paste0("./output/summary_table_sgene_variant.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Numbers of positive tests by variant and by S Gene status", 
+        align = c("l", "r", "r", "r", "r"), digits=c(NA, 0,0,0,0) ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+###Hospital admission by S Gene and Date 
+
+Number of admissions by daya from all cases tested after `r format(a_begin, "%d %b %Y")`.
+
+```{r graph_hop_sg, echo=FALSE, warning=FALSE, message = FALSE}
+
+knitr::include_graphics("./output/hosp_sgene_day.png")
+
+```
+
+
+
+### Covid Hospitalisations among those who tested positive in the community
+
+Individuals were not in hospital at the time of test
+
+```{r table_hosp_sg, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sgene_lh.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years and numbers of covid hospitalisations by S Gene status", 
+        align = c("l", "r", "r", "r"), digits=c(NA, 1,0,0) ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### Covid Hospitalisations all who tested positive by S Gene and Laboratory
+
+Individuals were not in hospital at the time of test
+
+```{r table_hosp_sglab, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sglab.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years and numbers of covid hospitalisations by S Gene and Laboratory status", 
+        align = c("l", "r", "r", "r"), digits=c(NA, 1,0,0) ) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### Expected S Negative Covid Hospitalisations among those who tested positive in the community
+
+Individuals were not in hospital at the time of test.  
+
+The expected numbers of hospitalisations were calculated by fitting a cox proportional hazards regression model to the S Positive cases only in the study period using predictors of age group, gender, deprivation, previous positive history, number of co-morbid Q Covid conditions, vaccine status including vaccine type, dose and duration.  The expected number of cases is derived from the predictions of expected survival from the model in all cases.  Hence the expected number of hospitalisations in the S positive group will match the observed.  Confidence intervals are derived from Byar's method. 
+
+The table below is based upon teh same selection criteria used to select the cases to fit the model. Namely not in hpsital at the time of test; tested in the community and linking into the EAVE-II study for risk group and deprivation status.
+
+```{r table_hosp_sg_exp, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sg_exp_hosp_eave.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years, numbers and expected numbers of covid hospitalisations by S Gene status", 
+        align = c("l", rep("r",7)), digits=c(NA,0, 1,0, 1,2,2,2),
+        col.names = c("S Gene","N","Person Years","Hospital Admissions","Expected Admissions",
+                      "Obs/Exp","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+The table below is based upon the same selection criteria used to select the cases to fit the model. Namely not in hpsital at the time of test; tested in the community.  However for individuals, who do not link into the EAVE study - about 5% of those who test positive - the number of risk groups is imputed as 0 risk groups, the modal value, and deprivation status is imputed as level 3 - the middle group. 
+
+```{r table_hosp_sg_exp_imp, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sg_exp_hosp_all.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years, numbers and expected numbers of covid hospitalisations by S Gene status", 
+        align = c("l", rep("r",7)), digits=c(NA,0, 1,0, 1,2,2,2),
+        col.names = c("S Gene","N","Person Years","Hospital Admissions","Expected Admissions",
+                      "Obs/Exp","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### Details of the Cox Model
+
+```{r cox_model, echo=FALSE, warning=FALSE, message = FALSE}
+
+z <- readRDS("./output/coxph_model_s_pos.rds")
+z1 <- summary(z)$conf.int %>% as.data.frame()
+colnames(z1) <- c("hr","x","lcl","ucl")
+z1 <- z1 %>% mutate(names=rownames(z1)) %>% filter(!grepl("ps\\(", names)) %>% 
+  filter(!is.na(hr)) %>% dplyr::select(-x) %>% dplyr::relocate(names, .before=hr)
+kableExtra::kbl(z1, 
+        caption = "Hazard ratios from cox model for S Positive cases only", 
+        align = c("l", rep("r",3)), digits=c(NA,2,2,2),
+        col.names = c("Covariates", "HR","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+
+```
+
+###Time to hospital admission by S Gene
+
+Individuals are not in hospital at the time of test and have had a community test.  The also link into the EAVE study
+
+```{r graph_cuminc_sg, echo=FALSE, warning=FALSE, message = FALSE}
+
+knitr::include_graphics("./output/cuminc_sg.png")
+
+```
+
+
+
+### Hospitalisation Rates by age group and S gene
+
+Individuals are not in hospital at the time of test and have had a community test.
+
+```{r table_hosp_sg_age, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sg_age.csv"))
+z_tab <- z_tab %>% dplyr::select(-x, -pt, -rate, - conf.level)
+kableExtra::kbl(z_tab, 
+        caption = "Person years, numbers and rate of covid hospitalisations by S Gene status", 
+        align = c("l","l", rep("r",6)), digits=c(NA,NA,1,0, 0,2,2,2),
+        col.names = c("S Gene", "Age Group","Person Years", "N","Hospital Admissions",
+                      "Rate per 100 person years","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+###Rate of hospital admission by S Gene and Age Group
+
+Individuals are not in hospital at the time of test and have had a community test.
+
+```{r graph_rate_sg_age, echo=FALSE, warning=FALSE, message = FALSE}
+
+knitr::include_graphics("./output/rate_sg_age.png")
+
+```
+
+###Sensitivity analysis of expected hospitalisations - Follow up of at least 7 days
+
+Individuals were not in hospital at the time of test, were tested in the community and linked into EAVE.  This sensitivity analysis is based upon all data from `r format(a_begin, "%d %b %Y")` but is restricted to those who tested positive by `r format(a_end-7, "%d %b %Y")` so that everyone has at least 7 days follow up post specimen date
+
+```{r table_hosp_sg_exp_sens7, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sg_exp_hosp_eave_sens7.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years, numbers and expected numbers of covid hospitalisations by S Gene status", 
+        align = c("l", rep("r",7)), digits=c(NA,0, 1,0, 1,2,2,2),
+        col.names = c("S Gene","N","Person Years","Hospital Admissions","Expected Admissions",
+                      "Obs/Exp","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+###Sensitivity analysis of expected hospitalisations - aged 20-59
+
+Individuals were not in hospital at the time of test, were tested in the community and linked into EAVE.  This sensitivity analysis is based upon all data from `r format(a_begin, "%d %b %Y")` but is restricted to those who were aged between 20 and 59.  This is the age range where the majority of the S Negative cases ocurr.
+
+```{r table_hosp_sg_exp_age2059, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_tab <- read_csv(paste0("./output/pyears_by_sg_exp_hosp_eave_age2059.csv"))
+kableExtra::kbl(z_tab, 
+        caption = "Person years, numbers and expected numbers of covid hospitalisations by S Gene status", 
+        align = c("l", rep("r",7)), digits=c(NA,0, 1,0, 1,2,2,2),
+        col.names = c("S Gene","N","Person Years","Hospital Admissions","Expected Admissions",
+                      "Obs/Exp","LCL","UCL")) %>%
+    kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+

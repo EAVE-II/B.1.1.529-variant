@@ -1,0 +1,221 @@
+---
+title: All Positive Cases from (01/11/21) - Vaccine Effects for Symptomatic Disease
+author: "Steven Kerr, Chris Robertson"
+date: ' `r format(Sys.Date(), "%d %B %Y")` '
+output:
+  html_document:
+  df_print: paged
+pdf_document: default
+word_document: default
+---
+  
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+######## 1 Load data #######
+# 01 Setup ####
+#Libraries
+library(tidyverse)
+library(lubridate)
+library(survival)
+library(mgcv)
+
+
+#Load data
+
+Location <- "/conf/"  # Server
+#Location <- "//isdsf00d03/"  # Desktop
+project_path <- paste0(Location,"EAVE/GPanalysis/progs/CR/SGene_Omicron")
+project_path_vaccine <- paste0(Location,"EAVE/GPanalysis/progs/CR/Vaccine")
+
+Location = '/conf/'
+
+setwd(paste0(Location, 'EAVE/GPanalysis/progs/CR/SGene_Omicron'))
+
+
+df <- readRDS(paste0(project_path,"/output/temp/df_tnd_pos_test.RDS"))
+
+
+fun_fit <- function(z_df, ref_level="uv") {
+z_levs <- levels(z_df$vs)
+z_df <- z_df %>% mutate(vs = fct_relevel(vs, ref_level))
+#print(table(z_df$event, z_df$sgene_classification, exclude=NULL))
+#print(table(z_df$vs, z_df$event, exclude=NULL))
+
+
+z <- gam(event ~ s(days) + s(age_year) + subject_sex + simd2020_sc_quintile + n_risk_gps + vs + pos_before_test + HB + n_tests_gp + shielding + immuno,
+         data=z_df, family="binomial")
+
+z_est <- fun_ve_glm(z)
+z1 <- z_est %>% filter(grepl("vs", names)) %>% dplyr::rename(vs=names) %>% 
+  mutate(vs = gsub("^vs","", vs)) %>% 
+  mutate(across(c("est","lcl","ucl"), ~exp(.)))
+z1 <- bind_rows(data.frame(est=1, lcl=1,ucl=1, vs=ref_level), z1)
+
+z2 <- z_df %>% group_by(vs) %>% dplyr::summarise(N=n(), R=sum(event)) %>% as.data.frame()
+z3 <- z2 %>% left_join(z1, by="vs") %>% mutate(vs=factor(vs, levels=z_levs)) %>% arrange(vs) #%>% 
+#mutate(ve=100*(1-est), x=100*(1-ucl), ucl=100*(1-lcl), lcl=x)
+#z3 <- z3 %>% dplyr::select( vs, N, R, ve, lcl, ucl)
+z3
+}
+
+fun_ve_glm <- function(z_raw){
+  z_coef <- cbind(z_raw$coefficients, confint.default(z_raw)) %>% as.data.frame()
+  names(z_coef) <- c("est","lcl","ucl")
+  z_coef$names <- names(z_raw$coefficients)
+  z_coef
+  }
+
+
+
+z_ids <- df %>% filter(event==1 & pos_before_test %in% c("pos_1:28")) %>% pull(EAVE_LINKNO)
+
+```
+
+## Introduction
+
+These estimates are based upon a test negative cohort design where vaccination records are linked to Ecoss for an end point of COVID 19 positive test. 
+
+The Ecoss data includes all PCR test results from both pillar 1 (NHS labs) and pillar 2 (Lighthouse government labs).  Only symptomatic lighthouse tests are used.  S Gene status is derived from the presence or absece of the S Gene on the TaqPath assay.  S Positive are samples with a Ct value below 30 on the S gene; Weak S Positive have a Ct value above 30 and S Gene deletion (S Negative) have no recorded value.
+
+For individuals with multip[le positive tests of a mixture of positive and negative tests the first positive symptomatic lighthouse case in the study period is selected. Individuals with only multiple symptomatic negative tests have one of these test results selected at random.
+
+The linkage to the national vaccination record within GP practices was achieved using the community health index (EAVE Study link number). 
+
+The EAVE-II study was used for the Q Covid clinical risk group information from GP records.
+
+The study period is `r format(min(df$event_date), "%d %B %Y") ` until `r format(max(df$event_date), "%d %B %Y") ` as the fisr Omicron cases is Scotland were detected in mid November 2021.  The event date in the study is the date of symptom onset.
+
+
+## Statistical Methods
+
+A  test negative design was used to estimate the odds ratios comparing unvaccinated at the time of test with post first dose vaccination period 0:3 weeks (0:27 days) and 4+ weeks up to dose 2, and then in 2 week periods from the date of the second dose of vaccination.  If an individual had a third dose or booster by the time of the test then they move into a 3 dose group 0:1 weeks (0:13 days), 2:3 weeks (14:27 days), and 4+ weeks (28+days).
+
+Vaccine effects are measured relative to the unvaccinated.
+
+For the analysis of the effect of booster vaccination for S Gene Negative and S Gene Positive infectionsthe vaccine effects are calculated relative to those dose 2 individuals who were initially eleigible for a booster dose - namely individuals who were in the v2_25+ category - 25 or more weeks after dose 2.
+
+This analysis includes the Pfizer/BioNTech vaccine, the Moderna vaccine and the AZ vaccine. 
+
+Analysis was by generalised additive logistic regression splione terms for age and temporal trend during the study period.   All models included vaccine status.  Further adjustment was made for gender and deprivation whether the individual had tested previously tested positive at any time before the specimen date  and number of Q Covid clinical risk groups (0, 1, 2, 3, 4, 5+), and whether or not the individual is recorded as (i) being immuno suppressed or (ii) in a sheilding category.  This is the minimal adjustment.  Full adjustment included additional clinical variables instead of the summary number of clincial risk groups.
+
+## Results
+
+### S Negative Aged 50 and over - dose 3/booster relative to dose 2 25+ weeks
+
+```{r s_neg_age50, echo=FALSE, warning=FALSE, message = FALSE}
+z_df <- filter(df, event_s_neg==1 | event==0 )  #s negs
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 50) 
+z_out <- fun_fit(z_df, ref_level="v2_25+")
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and Odds ratios relative to 2 dose 25+ weeks", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Odds Ratio","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### S Negative Aged 16 to 49 - dose 3/booster relative to dose 2 25+ weeks
+
+```{r s_neg_age16_49, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_neg==1 | event==0 )  #s negs
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 16 & age_year < 50) 
+z_out <- fun_fit(z_df, ref_level="v2_25+")
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and Odds ratios relative to 2 dose 25+ weeks", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Odds Ratio","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+
+### S Positive Aged 50 and over - dose 3/booster relative to dose 2 25+ weeks
+
+```{r s_pos_age50, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_pos==1 | event==0 )  #s pos
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 50) 
+z_out <- fun_fit(z_df, ref_level="v2_25+")
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and Odds ratios relative to 2 dose 25+ weeks", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Odds Ratio","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### S Positive Aged 16 to 49 - dose 3/booster relative to dose 2 25+ weeks
+
+```{r s_pos_age16_49, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_pos==1 | event==0 )  #s pos
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 16 & age_year < 50) 
+z_out <- fun_fit(z_df, ref_level="v2_25+")
+
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and Odds ratios relative to 2 dose 25+ weeks", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Odds Ratio","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### S Positive Aged 50 and over Vaccine Effects relative to unvaccinated
+
+```{r s_pos_age50_ve, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_pos==1 | event==0 )  #s pos
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 50) 
+z_out <- fun_fit(z_df, ref_level="uv")
+
+z_out <- z_out %>% mutate(ve=100*(1-est), x=100*(1-ucl), ucl=100*(1-lcl), lcl=x) %>% 
+  dplyr::select( vs, N, R, ve, lcl, ucl)
+
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and vaccine effects relative to unvaccinateds", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Vaccine Effect","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### S Positive Aged 16 to 49 Vaccine Effects relative to unvaccinated
+
+```{r s_pos_age16_49_ve, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_pos==1 | event==0 )  #s pos
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids)) %>% filter(age_year >= 16 & age_year < 50) 
+z_out <- fun_fit(z_df, ref_level="uv")
+
+z_out <- z_out %>% mutate(ve=100*(1-est), x=100*(1-ucl), ucl=100*(1-lcl), lcl=x) %>% 
+  dplyr::select( vs, N, R, ve, lcl, ucl)
+
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and vaccine effects relative to unvaccinateds", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Vaccine Effect","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
+### S Positive All ages Vaccine Effects relative to unvaccinated
+
+```{r s_pos_age_ve, echo=FALSE, warning=FALSE, message = FALSE}
+
+z_df <- filter(df, event_s_pos==1 | event==0 )  #s pos
+z_df <- z_df %>% filter(!(EAVE_LINKNO %in% z_ids))  
+z_out <- fun_fit(z_df, ref_level="uv")
+
+z_out <- z_out %>% mutate(ve=100*(1-est), x=100*(1-ucl), ucl=100*(1-lcl), lcl=x) %>% 
+ dplyr::select( vs, N, R, ve, lcl, ucl)
+
+
+kableExtra::kbl(z_out, 
+                caption = "Numbers Tested and Positive and vaccine effects relative to unvaccinateds", 
+                align = c("l", rep("r",5)), digits=c(NA,0, 0, 2,2,2),
+                col.names = c("Vaccine Status","Tested","Positive","Vaccine Effect","LCL","UCL")) %>%
+  kableExtra::kable_classic(full_width = F, html_font = "Cambria", position = "left")
+```
+
